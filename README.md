@@ -147,6 +147,17 @@ Open http://localhost:5173. In development, Vite proxies `/api` requests to the 
 | `POST`   | `/api/ask`          | `{ session_id, question }` → answer, source passages with similarity scores |
 | `DELETE` | `/api/session/{id}` | Discard a session's documents                                               |
 
+| 1. Add key and documents
+| ![Upload](assets/ui-upload.png)
+
+2. Ask questions
+
+![Chat](assets/ui-chat1.png)
+![Chat](assets/ui-chat2.png)
+
+CLI:
+![Chat](assets/cli-chat.png)
+
 ### How the web app handles data
 
 - The web app reuses `ingestion_pipeline.py` (line-ending normalization, chunking, embedding, storing), so the command-line scripts and the web app share one ingestion path. It retrieves the top 6 chunks per question.
