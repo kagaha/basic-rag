@@ -1,9 +1,36 @@
 import os
 from langchain_community.document_loaders import TextLoader, DirectoryLoader
-from langchain_text_splitters import CharacterTextSplitter
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_CHUNK_OVERLAP = 100
+
+
+def normalize_text(text):
+    """Use Unix line endings so paragraph breaks ("\\n\\n") are recognised.
+
+    Files saved on Windows use "\\r\\n", which the text splitter would not see
+    as a paragraph break.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def documents_from_texts(items):
+    """Build Documents from (name, text) pairs held in memory.
+
+    Used by the web app, where text comes from uploads or pasted input rather
+    than from a folder on disk. Empty texts are skipped.
+    """
+    documents = []
+    for name, text in items:
+        text = normalize_text(text)
+        if text.strip():
+            documents.append(Document(page_content=text, metadata={"source": name}))
+    return documents
 
 
 def load_documents(docs_path="docs"):
@@ -38,19 +65,43 @@ def load_documents(docs_path="docs"):
     return documents
 
 
-# Used the basic chunking method with fixed chunk size and overlap
-def split_documents(documents, chunk_size=1000, chunk_overlap=0):
-    """Split documents into smaller chunks with overlap"""
-    print("Splitting documents into chunks...")
+def looks_like_citations(text):
+    """True for chunks that are mostly reference-list entries.
 
-    text_splitter = CharacterTextSplitter(
+    Wikipedia-style exports end with long lists of citations ("Archived from
+    the original on ...", "Retrieved ..."). Their titles often match a question
+    better than the real paragraph does, so they crowd out useful chunks.
+    """
+    return text.count("Retrieved ") >= 2 or text.count("Archived ") >= 2
+
+
+# Recursive splitting tries paragraph breaks first, then lines, then words, so
+# chunks follow the structure of the text. Overlap keeps context across chunk edges.
+def split_documents(
+    documents,
+    chunk_size=DEFAULT_CHUNK_SIZE,
+    chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+    drop_citation_chunks=True,
+    verbose=True,
+):
+    """Split documents into overlapping chunks, optionally dropping citation lists"""
+    if verbose:
+        print("Splitting documents into chunks...")
+
+    text_splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap
     )
 
     chunks = text_splitter.split_documents(documents)
 
-    if chunks:
+    if drop_citation_chunks:
+        kept = [c for c in chunks if not looks_like_citations(c.page_content)]
+        if verbose and len(kept) < len(chunks):
+            print(f"Dropped {len(chunks) - len(kept)} citation/reference chunks")
+        chunks = kept
+
+    if chunks and verbose:
 
         for i, chunk in enumerate(chunks[:5]):
             print(f"\n--- Chunk {i+1} ---")
@@ -65,29 +116,51 @@ def split_documents(documents, chunk_size=1000, chunk_overlap=0):
 
     return chunks
 
+
 def get_embedding_model():
     return HuggingFaceEmbeddings(
-        model_name="BAAI/bge-small-en-v1.5",
+        model_name=EMBEDDING_MODEL_NAME,
             encode_kwargs={"normalize_embeddings": True},  # good for cosine similarity
         )
 
-def create_vector_store(chunks, persist_directory="db/chroma_db"):
-    """Create and persist ChromaDB vector store"""
-    print("Creating embeddings and storing in ChromaDB...")
 
-    embedding_model = get_embedding_model()
+def create_vector_store(
+    chunks,
+    persist_directory="db/chroma_db",
+    collection_name=None,
+    embedding_model=None,
+    verbose=True,
+):
+    """Create a ChromaDB vector store.
+
+    persist_directory=None keeps the store in memory only (used by the web app,
+    with one collection per session). Pass embedding_model to reuse an already
+    loaded model instead of loading a new one.
+    """
+    if verbose:
+        print("Creating embeddings and storing in ChromaDB...")
+
+    embedding_model = embedding_model or get_embedding_model()
 
     # Create ChromaDB vector store
-    print("--- Creating vector store ---")
+    if verbose:
+        print("--- Creating vector store ---")
+    options = {}
+    if collection_name:
+        options["collection_name"] = collection_name
     vectorstore = Chroma.from_documents(
         documents=chunks,
         embedding=embedding_model,
         persist_directory=persist_directory,
-        collection_metadata={"hnsw:space": "cosine"}
+        collection_metadata={"hnsw:space": "cosine"},
+        **options,
     )
-    print("--- Finished creating vector store ---")
-
-    print(f"Vector store created and saved to {persist_directory}")
+    if verbose:
+        print("--- Finished creating vector store ---")
+        if persist_directory:
+            print(f"Vector store created and saved to {persist_directory}")
+        else:
+            print("Vector store created in memory")
     return vectorstore
 
 def main():
@@ -127,29 +200,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-# documents = [
-#    Document(
-#        page_content="Google LLC is an American multinational corporation and technology company focusing on online advertising, search engine technology, cloud computing, computer software, quantum computing, e-commerce, consumer electronics, and artificial intelligence (AI).",
-#        metadata={'source': 'docs/google.txt'}
-#    ),
-#    Document(
-#        page_content="Microsoft Corporation is an American multinational corporation and technology conglomerate headquartered in Redmond, Washington.",
-#        metadata={'source': 'docs/microsoft.txt'}
-#    ),
-#    Document(
-#        page_content="Nvidia Corporation is an American technology company headquartered in Santa Clara, California.",
-#        metadata={'source': 'docs/nvidia.txt'}
-#    ),
-#    Document(
-#        page_content="Space Exploration Technologies Corp., commonly referred to as SpaceX, is an American space technology company headquartered at the Starbase development site in Starbase, Texas.",
-#        metadata={'source': 'docs/spacex.txt'}
-#    ),
-#    Document(
-#        page_content="Tesla, Inc. is an American multinational automotive and clean energy company headquartered in Austin, Texas.",
-#        metadata={'source': 'docs/tesla.txt'}
-#    )
-# ]
